@@ -170,14 +170,99 @@ def run_inference(
 
     print(f"  Loaded {len(ckpt_data):,} records from checkpoints.")
 
+    # 4. Global Bipartite Conflict Resolution & Tail Over-linking Suppression
+    print("\n4. Applying Global Bipartite Conflict Resolution and Tail Guardrails...")
+    mid_claims = defaultdict(list)
+    s1_matches = {}
+    for s1_id in s1_order:
+        _, m_str = ckpt_data.get(s1_id, ("", ""))
+        m_list = m_str.split(",") if m_str.strip() else []
+        s1_matches[s1_id] = m_list
+        for mid in m_list:
+            mid_claims[mid].append(s1_id)
+
+    conflicting_mids = {mid: s1s for mid, s1s in mid_claims.items() if len(s1s) > 1}
+    print(f"  Detected {len(conflicting_mids):,} multi-claimed S2/S3 records.")
+
+    if conflicting_mids:
+        # Load records for conflicting entities only
+        conflicting_s1_set = {s1 for s1s in conflicting_mids.values() for s1 in s1s}
+        s1_records = {}
+        with open(test_s1_path, "r", encoding="utf-8") as f:
+            f.readline()
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if parts[0] in conflicting_s1_set:
+                    s1_records[parts[0]] = (parts[1], parts[2] if len(parts)>2 else "", parts[3])
+
+        conflicting_mid_set = set(conflicting_mids.keys())
+        s23_records = {}
+        for src in [test_s2_path, test_s3_path]:
+            with open(src, "r", encoding="utf-8") as f:
+                f.readline()
+                for line in f:
+                    parts = line.rstrip("\n").split("\t")
+                    if parts[0] in conflicting_mid_set:
+                        s23_records[parts[0]] = (parts[1], parts[2] if len(parts)>2 else "", parts[3])
+
+        # Score competing pairs
+        pairs_to_score = []
+        features_to_score = []
+        for mid, s1_list in conflicting_mids.items():
+            r2 = s23_records[mid]
+            for s1_id in s1_list:
+                r1 = s1_records[s1_id]
+                feats = extract_pair_features(r1, r2, mid)
+                pairs_to_score.append((mid, s1_id))
+                features_to_score.append(feats)
+
+        X = np.array(features_to_score, dtype=np.float32)
+        probs = predict_probabilities(booster, X)
+
+        mid_best_s1 = {}
+        mid_best_prob = {}
+        for (mid, s1_id), p in zip(pairs_to_score, probs):
+            if mid not in mid_best_prob or p > mid_best_prob[mid]:
+                mid_best_prob[mid] = p
+                mid_best_s1[mid] = s1_id
+
+        # Assign each mid strictly to its highest probability S1 claim
+        resolved_s1_matches = defaultdict(list)
+        for s1_id in s1_order:
+            orig = s1_matches[s1_id]
+            kept = []
+            for mid in orig:
+                if mid in conflicting_mids:
+                    if mid_best_s1[mid] == s1_id:
+                        kept.append((mid, mid_best_prob[mid]))
+                else:
+                    kept.append((mid, 1.0))
+
+            if len(kept) >= 6:
+                kept.sort(key=lambda x: -x[1])
+                top_p = kept[0][1]
+                pruned = []
+                for rank, (mid, p) in enumerate(kept, 1):
+                    if rank > 8 and p < 0.98:
+                        continue
+                    if rank > 5 and p < 0.85 * top_p:
+                        continue
+                    pruned.append(mid)
+                resolved_s1_matches[s1_id] = pruned
+            else:
+                resolved_s1_matches[s1_id] = [m for m, _ in kept]
+    else:
+        resolved_s1_matches = s1_matches
+
     matching_tsv_path = os.path.join(output_dir, "matching_results.tsv")
     candidate_tsv_path = os.path.join(output_dir, "candidate_pairs.tsv")
 
+    print(f"\n5. Writing final output files to {output_dir}...")
     print(f"  Writing {matching_tsv_path} ...")
     with open(matching_tsv_path, "w", encoding="utf-8") as f_match:
         f_match.write("source1_entity_id\tmatched_entity_ids\n")
         for s1_id in s1_order:
-            _, m_str = ckpt_data.get(s1_id, ("", ""))
+            m_str = ",".join(resolved_s1_matches.get(s1_id, []))
             f_match.write(f"{s1_id}\t{m_str}\n")
 
     print(f"  Writing {candidate_tsv_path} ...")
