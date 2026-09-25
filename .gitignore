@@ -1,0 +1,32 @@
+# Environments
+venv/
+.venv/
+env/
+
+# Binary & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.DS_Store
+*.pt
+*.bin
+*.parquet
+*.pth
+
+# Large Dataset Files
+*.tsv
+*.csv
+*.zip
+**/dataset/
+student_resource/dataset/
+
+# Output directories & artifacts
+**/output/
+student_resource/output/
+checkpoints/
+
+# Scratch & Staging
+scratch/
+staging/
+__MACOSX/
