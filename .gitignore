@@ -30,3 +30,4 @@ checkpoints/
 scratch/
 staging/
 __MACOSX/
+catboost_info/
